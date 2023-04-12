@@ -8,15 +8,13 @@ Sung Woo Choi, 04/03/2023
 import copy
 import numpy as np
 import scipy.sparse as sp
+from scipy.optimize import linprog
+from scipy.linalg import block_diag
 import polytope as pc
-
 import glpk
 import gurobipy as gp
 from gurobipy import GRB
-from scipy.optimize import linprog
-# from scipy.linalg import block_diag
-# import polytope as pc
-
+from StarV.set.star import Star
 
 class SparseStar(object):
     """
@@ -186,11 +184,14 @@ class SparseStar(object):
             self.A = np.hstack([c, I])
             self.C = sp.csc_matrix(P.A)
             self.d = P.b
-            self.pred_lb, self.pred_ub = self.getRanges()
             self.dim = P.dim
             self.nVars = P.dim
-            self.nZvars = 0
-
+            self.nZVars = 0
+            self.pred_lb = np.array([])
+            self.pred_ub = np.array([])
+            self.pred_depth = np.zeros(self.dim)
+            self.pred_lb, self.pred_ub = self.getRanges()
+            
         elif len_ == 0:
             self.A = np.array([])
             self.C = sp.csc_matrix([])
@@ -206,10 +207,13 @@ class SparseStar(object):
             raise Exception(
                 'error: invalid number of input arguments (should be 0, 1, 2, 6)')
 
-    def __str__(self):
+    def __str__(self, toDense = True):
         print('SparseStar Set:')
-        print('A: {}'.format(self.A))
-        print('C: {}'.format(self.C))
+        print('A: \n{}'.format(self.A))
+        if toDense:
+            print('C_{}: \n{}'.format(self.C.getformat(), self.C.todense()))
+        else:
+            print('C: {}'.format(self.C))
         print('d: {}'.format(self.d))
         print('pred_lb: {}'.format(self.pred_lb))
         print('pred_ub: {}'.format(self.pred_ub))
@@ -235,17 +239,17 @@ class SparseStar(object):
     def c(self, index=None):
         """Gets center vector of SparseStar"""
         if index is None:
-            return self.A[:, 0]
+            return self.A[:, 0].reshape(-1, 1)
         else:
-            return self.A[index, 0]
+            return self.A[index, 0].reshape(-1, 1)
 
-    def X(self, index=None):
+    def X(self, row=None):
         """Gets basis matrix of predicate variables corresponding to the current dimension"""
         mA = self.A.shape[1]
-        if index is None:
+        if row is None:
             return self.A[:, 1:mA]
         else:
-            return self.A[index, 1:mA]
+            return self.A[row, 1:mA]
 
     def V(self, row=None):
         """Gets basis matrix"""
@@ -282,7 +286,7 @@ class SparseStar(object):
 
         if W is not None:
             assert isinstance(W, np.ndarray), 'error: \
-                the mapping matrix should be a 2D torch tensor'
+                the mapping matrix should be a 2D numpy array'
             assert W.shape[1] == self.dim, 'error: \
                 inconsistency between mapping matrix and SparseStar dimension'
 
@@ -290,9 +294,9 @@ class SparseStar(object):
 
         if b is not None:
             assert isinstance(b, np.ndarray), 'error: \
-                the offset vector should be a 1D torch tensor'
+                the offset vector should be a 1D numpy array'
             assert len(b.shape) == 1, 'error: \
-                offset vector should be a 1D torch tensor'
+                offset vector should be a 1D numpy array'
 
             if W is not None:
                 assert W.shape[0] == b.shape[0], 'error: \
@@ -328,7 +332,7 @@ class SparseStar(object):
                 else:
                     x = min_.addMVar(shape=self.nVars)
                 min_.setObjective(f @ x, GRB.MINIMIZE)
-                if len(self.C) > 0:
+                if len(self.d) > 0:
                     C = self.C
                     d = self.d
                 else:
@@ -346,7 +350,7 @@ class SparseStar(object):
             elif lp_solver == 'linprog':
 
                 # https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linprog.html
-                if len(self.C) == 0:
+                if len(self.d) == 0:
                     A = np.zeros((1, self.nVars))
                     b = np.zeros(1)
                 else:
@@ -372,7 +376,7 @@ class SparseStar(object):
 
                 glpk.env.term_on = False
 
-                if len(self.C) == 0:
+                if len(self.d) == 0:
                     A = np.zeros((1, self.nVars))
                     b = np.zeros(1)
                 else:
@@ -437,7 +441,7 @@ class SparseStar(object):
                 else:
                     x = max_.addMVar(shape=self.nVars)
                 max_.setObjective(f @ x, GRB.MAXIMIZE)
-                if len(self.C) > 0:
+                if len(self.d) > 0:
                     C = self.C
                     d = self.d
                 else:
@@ -454,7 +458,7 @@ class SparseStar(object):
 
             elif lp_solver == 'linprog':
                 # https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linprog.html
-                if len(self.C) == 0:
+                if len(self.d) == 0:
                     A = np.zeros((1, self.nVars))
                     b = np.zeros(1)
                 else:
@@ -479,7 +483,7 @@ class SparseStar(object):
 
                 glpk.env.term_on = False  # turn off messages/display
 
-                if len(self.C) == 0:
+                if len(self.d) == 0:
                     A = np.zeros((1, self.nVars))
                     b = np.zeros(1)
                 else:
@@ -548,8 +552,8 @@ class SparseStar(object):
         pos_f = np.maximum(self.X(index), 0.0)
         neg_f = np.minimum(self.X(index), 0.0)
 
-        xmin = self.c(index) + np.matmul(pos_f, l) + np.matmul(neg_f, u)
-        xmax = self.c(index) + np.matmul(neg_f, l) + np.matmul(pos_f, u)
+        xmin = self.c(index).flatten() + np.matmul(pos_f, l) + np.matmul(neg_f, u)
+        xmax = self.c(index).flatten() + np.matmul(neg_f, l) + np.matmul(pos_f, u)
         return xmin, xmax
 
     def estimateRanges(self):
@@ -565,12 +569,13 @@ class SparseStar(object):
         pos_f = np.maximum(self.X(), 0.0)
         neg_f = np.minimum(self.X(), 0.0)
 
-        xmin = self.c() + np.matmul(pos_f, l) + np.matmul(neg_f, u)
-        xmax = self.c() + np.matmul(neg_f, l) + np.matmul(pos_f, u)
+        xmin = self.c().flatten() + np.matmul(pos_f, l) + np.matmul(neg_f, u)
+        xmax = self.c().flatten() + np.matmul(neg_f, l) + np.matmul(pos_f, u)
         return xmin, xmax
 
     def getRange(self, index, lp_solver='gurobi'):
-        """Gets the lower and upper bounds"""
+        """Gets the lower and upper bounds of x[index]"""
+
         if lp_solver == 'estimate':
             return self.estimateRange(index)
         else:
@@ -578,14 +583,28 @@ class SparseStar(object):
             u = self.getMax(index)
             return l, u
 
-    def getRanges(self, lp_solver='gurobi'):
-        if lp_solver == 'estimate':
-            return self.estimateRanges()
+    def getRanges(self, lp_solver='gurobi', relaxFactor=0.0):
+        """Gets the lower and upper bound vectors of the state"""
+        
+        if relaxFactor == 0.0:
+            if lp_solver == 'estimate':
+                return self.estimateRanges()
+            else:
+                l = self.getMins(np.arange(self.dim))
+                u = self.getMaxs(np.arange(self.dim))
+                return l, u
         else:
-            l = self.getMins(np.arange(self.dim))
-            u = self.getMaxs(np.arange(self.dim))
-            return l, u
-
+            assert relaxFactor > 0.0 and relaxFactor < 1.0, 'error: \
+            relaxation factor should be greater than 0.0 but less than 1.0'
+            l, u = self.estimateRanges()
+            n1 = round(1 - relaxFactor)*len(l)
+            midx = np.argsort((u - l))[::-1]
+            l1 = self.getMins(midx[0:n1])
+            u1 = self.getMaxs(midx[0:n1])
+            l[midx[0:n1]] = l1
+            u[midx[0:n1]] = u1
+            return l, u            
+            
     def predReduction(self, p_map):
         """Reduces selected predicate variables"""
 
@@ -636,33 +655,64 @@ class SparseStar(object):
         assert isinstance(S, SparseStar), 'error: input is not a SparseStar'
         assert self.dim == S.dim, 'error: inconsistent dimension between the input and the self object'
 
-        mOA = self.A.shape[1]
-        mSA = self.S.shape[1]
-
         X = np.hstack((self.X(), S.X()))
         c = self.c() + S.c()
         A = np.hstack((c, X))
 
-        OC1 = self.C[:, 1:self.nZVars]
-        OC2 = self.C[: self.nZVars+1:self.nVars]
+        OC1 = self.C[:, 0:self.nZVars]
+        OC2 = self.C[:, self.nZVars:self.nVars]
 
-        SC1 = S.C[:, 1:S.nZVars]
-        SC2 = S.C[: S.nZVars+1:S.nVars]
+        SC1 = S.C[:, 0:S.nZVars]
+        SC2 = S.C[:, S.nZVars:S.nVars]
 
-        C = sp.hstack((sp.block_diag((OC1, SC1)),
-                      sp.block_diag((OC2, SC2)))).tocsc()
-        d = np.vstack((self.d, S.d))
+        C1 = sp.block_diag((OC1, SC1))
+        C2 = sp.block_diag((OC2, SC2))
 
-        pred_lb = np.hstack((self.pred_lb[0:self.nZVars], S.pred_lb[0:S.nZVars,
-                            self.pred_lb[self.nZVars+1:self.nVars], S.pred_lb[S.self.nZVars+1:S.nVars]]))
-        pred_ub = np.hstack((self.pred_ub[0:self.nZVars], S.pred_ub[0:S.nZVars,
-                            self.pred_ub[self.nZVars+1:self.nVars], S.pred_ub[S.self.nZVars+1:S.nVars]]))
-        pred_depth = np.hstack((self.pred_depth[0:self.nZVars], S.pred_depth[0:S.nZVars,
-                            self.pred_depth[self.nZVars+1:self.nVars], S.pred_depth[S.self.nZVars+1:S.nVars]]))
+        if C1.nnz > 0:                    
+            C = sp.hstack((C1, C2)).tocsc()
+        else:
+            C = C2.tocsc()
+        d = np.concatenate((self.d, S.d))
+
+        pred_lb = np.hstack((self.pred_lb[0:self.nZVars], S.pred_lb[0:S.nZVars],
+                            self.pred_lb[self.nZVars:self.nVars], S.pred_lb[S.nZVars:S.nVars]))
+        pred_ub = np.hstack((self.pred_ub[0:self.nZVars], S.pred_ub[0:S.nZVars],
+                            self.pred_ub[self.nZVars:self.nVars], S.pred_ub[S.nZVars:S.nVars]))
+        pred_depth = np.hstack((self.pred_depth[0:self.nZVars], S.pred_depth[0:S.nZVars],
+                            self.pred_depth[self.nZVars:self.nVars], S.pred_depth[S.nZVars:S.nVars]))
         return SparseStar(A, C, d, pred_lb, pred_ub, pred_depth)
 
     def concatenate(self, S):
-        pass
+        """Concatenates two sparse star sets """
+
+        assert isinstance(S, SparseStar), 'error: input is not a SparseStar'
+
+        c = np.concatenate(self.c(), S.c())
+        X = block_diag(self.X(), S.X())
+        A = np.hstack((c, X))
+
+        OC1 = self.C[:, 0:self.nZVars]
+        OC2 = self.C[:, self.nZVars:self.nVars]
+
+        SC1 = S.C[:, 0:S.nZVars]
+        SC2 = S.C[:, S.nZVars:S.nVars]
+
+        C1 = sp.block_diag((OC1, SC1))
+        C2 = sp.block_diag((OC2, SC2))
+
+        if C1.nnz > 0:                    
+            C = sp.hstack((C1, C2)).tocsc()
+        else:
+            C = C2.tocsc()
+        d = np.concatenate((self.d, S.d))
+
+        pred_lb = np.hstack((self.pred_lb[0:self.nZVars], S.pred_lb[0:S.nZVars],
+                            self.pred_lb[self.nZVars:self.nVars], S.pred_lb[S.nZVars:S.nVars]))
+        pred_ub = np.hstack((self.pred_ub[0:self.nZVars], S.pred_ub[0:S.nZVars],
+                            self.pred_ub[self.nZVars:self.nVars], S.pred_ub[S.nZVars:S.nVars]))
+        pred_depth = np.hstack((self.pred_depth[0:self.nZVars], S.pred_depth[0:S.nZVars],
+                            self.pred_depth[self.nZVars:self.nVars], S.pred_depth[S.nZVars:S.nVars]))
+        return SparseStar(A, C, d, pred_lb, pred_ub, pred_depth)
 
     def sample(self, N):
         """Samples number of points in the feasible SparseStar set"""
@@ -676,17 +726,65 @@ class SparseStar(object):
             X = (ub[i] - lb[i]) * np.random.rand(2*N, 1) + lb[i]
             V1 = np.hstack([V1, X]) if V1.size else X
 
-        V = np.array([]).reshape(0, self.dim)
+        V = np.array([])
         for i in range(2*N):
             v1 = V1[i, :]
             if self.contains(v1):
-                V = np.vstack([V, v1])
+                V = np.vstack([V, v1]) if V.size else V1
 
         V = V.T
         if V.shape[1] >= N:
             V = V[:, 0:N]
         return V
 
+    def toStar(self):
+        if len(self.d) > 0:
+            return Star(np.column_stack((self.c(), self.V())), self.C.todense(), self.d, self.pred_lb, self.pred_ub)
+        else:
+            return Star(np.column_stack((self.c(), self.V())), np.array([]), self.d, self.pred_lb, self.pred_ub)
+
+    def contains(self, s):
+        """
+            Checks if a Star set contains a point.
+            s : a star point (1D numpy array)
+            
+            return :
+                1 -> a star set contains a point, s 
+                0 -> a star set does not contain a point, s
+                else -> error code from Gurobi LP solver
+        """
+        assert len(s.shape) == 1, 'error: invalid point. It should be 1D numpy array'
+        assert s.shape[0] == self.dim, 'error: Dimension mismatch'     
+        
+        f = np.zeros(self.nVars)
+        m = gp.Model()
+        # prevent optimization information
+        m.Params.LogToConsole = 0
+        m.Params.OptimalityTol = 1e-9
+        if self.pred_lb.size and self.pred_ub.size:
+            x = m.addMVar(shape=self.nVars, lb=self.pred_lb, ub=self.pred_ub)
+        else:
+            x = m.addMVar(shape=self.nVars)
+        m.setObjective(f @ x, GRB.MINIMIZE)
+        if len(self.d) > 0:
+            C = self.C
+            d = self.d
+        else:
+            C = sp.csr_matrix(np.zeros((1, self.nVars)))
+            d = 0
+        m.addConstr(C @ x <= d)
+        Ae = sp.csr_matrix(self.V())
+        be = s - self.c()
+        m.addConstr(Ae @ x == be)
+        m.optimize()
+
+        if m.status == 2:
+            return True
+        elif m.status == 3:
+            return False
+        else:
+            raise Exception('error: exitflat = %d' % (m.status))
+        
     @staticmethod
     def rand(dim, N):
         """Generates a random SparseStar set

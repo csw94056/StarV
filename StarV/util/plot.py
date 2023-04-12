@@ -51,6 +51,10 @@ def plot_2D_Star(I, show=True):
     except Exception:
         warnings.warn(message='Potential floating-point error')
     if show:
+        l, u = I.getRanges()
+        ax = plt.gca()
+        ax.set_xlim(l[0], u[0])
+        ax.set_ylim(l[1], u[1])
         plt.show()
     
 
